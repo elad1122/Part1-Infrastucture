@@ -1,0 +1,12 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+tfplan
+terraform.tfvars
+*.auto.tfvars
+
+# Cluster secrets - never commit
+rke2/token
+rke2/kubeconfig*.yaml

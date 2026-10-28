@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored.
+project_id = "my-gcp-project-id"
+
+# Your public IP (find it with: curl ifconfig.me), as /32
+admin_cidrs  = ["1.2.3.4/32"]
+access_cidrs = ["1.2.3.4/32"] # add reviewers' IPs later
+
+# Optional overrides
+# region              = "me-west1"     # Tel Aviv: lower latency, slightly pricier
+# zone                = "me-west1-a"
+# machine_type        = "e2-standard-2" # 8 GB instead of 12 GB
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"
