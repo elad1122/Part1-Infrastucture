@@ -1,11 +1,5 @@
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-crash.log
-tfplan
-terraform.tfvars
-*.auto.tfvars
+# Local-only: VM provisioning code + live Terraform state (not part of the submission)
+terraform/
 
 # Cluster secrets - never commit
 rke2/token

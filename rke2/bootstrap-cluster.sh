@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds the 3-node RKE2 cluster on the Terraform-created VMs, from your laptop (Git Bash / Linux / macOS).
+# Builds the 3-node RKE2 cluster on the 3 GCP VMs, from your laptop (Git Bash / Linux / macOS).
 #   1. generates the join token (once)
 #   2. installs the first server on node-1 (bootstraps etcd)
 #   3. joins node-2 and node-3 as servers, one at a time, waiting for each to be Ready
@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 RKE2_VERSION="v1.36.5+rke2r1"   # stable channel at build time – pinned for reproducibility
 SSH_USER="rke2admin"
 
-# name:internal-ip:external-ip  (values from: terraform -chdir=../terraform output)
+# name:internal-ip:external-ip  (the static IPs reserved for each VM)
 NODES=(
   "rke2-node-1:10.10.0.11:34.56.31.129"
   "rke2-node-2:10.10.0.12:136.65.198.33"

@@ -5,8 +5,7 @@ Every node runs **control-plane + etcd + worker**, as the task requires.
 
 It documents:
 1. **The VM resources I chose, and why** (compute, disks, network, OS)
-2. **How the VMs were provisioned** (Terraform)
-3. **How RKE2 was installed**, step by step, with every config option explained
+2. **How RKE2 was installed**, step by step, with every config option explained
 
 ---
 
@@ -14,16 +13,15 @@ It documents:
 - [Architecture](#architecture)
 - [Repository layout](#repository-layout)
 - [1. VM resources and why](#1-vm-resources-and-why)
-- [2. Prerequisites](#2-prerequisites)
-- [3. Provisioning the VMs (Terraform)](#3-provisioning-the-vms-terraform)
-- [4. Installing RKE2](#4-installing-rke2)
-- [5. Accessing the cluster](#5-accessing-the-cluster)
-- [6. Verification](#6-verification)
-- [7. RKE2 installation defaults](#7-rke2-installation-defaults)
-- [8. Issues hit during the build and fixes](#8-issues-hit-during-the-build-and-fixes)
-- [9. Security notes](#9-security-notes)
-- [10. Limitations and future improvements](#10-limitations-and-future-improvements)
-- [11. Cost and teardown](#11-cost-and-teardown)
+- [2. Preparing the VMs](#2-preparing-the-vms)
+- [3. Installing RKE2](#3-installing-rke2)
+- [4. Accessing the cluster](#4-accessing-the-cluster)
+- [5. Verification](#5-verification)
+- [6. RKE2 installation defaults](#6-rke2-installation-defaults)
+- [7. Issues hit during the build and fixes](#7-issues-hit-during-the-build-and-fixes)
+- [8. Security notes](#8-security-notes)
+- [9. Limitations and future improvements](#9-limitations-and-future-improvements)
+- [10. Cost](#10-cost)
 
 ---
 
@@ -53,20 +51,12 @@ It documents:
 
 ```
 .
-├── terraform/                  # GCP infrastructure as code
-│   ├── versions.tf             # Terraform/provider pins, enables the Compute API
-│   ├── variables.tf            # all tunables: sizing, IPs, allowed CIDRs
-│   ├── network.tf              # VPC, subnet, firewall rules
-│   ├── compute.tf              # static IPs, /var disks, the 3 VMs
-│   ├── outputs.tf              # IPs and ready-made ssh commands
-│   ├── scripts/node-prep.sh    # first-boot OS preparation
-│   └── terraform.tfvars.example
 └── rke2/
     ├── install-rke2-server.sh  # installs + configures ONE RKE2 server node (idempotent)
     └── bootstrap-cluster.sh    # builds the whole cluster from the laptop
 ```
 
-Never committed (git-ignored): `terraform.tfvars`, Terraform state, the RKE2 join token, kubeconfig files.
+Never committed (git-ignored): the RKE2 join token and kubeconfig files.
 
 ---
 
@@ -120,12 +110,7 @@ rke2-node-3   731m         36%      945Mi           7%
   - If `/var` fills up (images, logs), the root filesystem stays healthy and the OS keeps working.
   - It can be resized on its own (GCP disks grow online).
 - **pd-balanced (SSD-backed):** etcd is very sensitive to disk latency (fsync), and pd-standard HDDs can cause leader elections and slow API calls.
-- **Why only 20 GB for the boot disk:** once `/var` is moved off it, `/` holds only the OS (about 2.4 GB used). Also, pd-balanced counts toward the regional `SSD_TOTAL_GB` quota (250 GB). 3 × (20 + 60) = **240 GB** fits; a 30 GB boot disk (270 GB total) failed the quota.
-
-**How `/var` was set up** ([`terraform/scripts/node-prep.sh`](terraform/scripts/node-prep.sh), a GCE startup script):
-1. Formats the data disk (`/dev/disk/by-id/google-var-disk`) as ext4, **only if it has no filesystem yet**, so it never wipes data.
-2. Copies the existing `/var` onto it, adds it to `/etc/fstab` by UUID, and reboots once.
-3. This runs on first boot, before anything is installed, so no live data is copied.
+- **Why only 20 GB for the boot disk:** once `/var` is moved off it, `/` holds only the OS (about 2.4 GB used). Also, pd-balanced counts toward the regional `SSD_TOTAL_GB` quota (250 GB). 3 × (20 + 60) = **240 GB** fits; a 30 GB boot disk (270 GB total) would exceed it.
 
 ### 1.4 Operating system
 
@@ -133,10 +118,6 @@ rke2-node-3   731m         36%      945Mi           7%
 - officially supported by RKE2
 - 5 years of security updates
 - cgroup v2 out of the box
-
-The startup script also:
-- **turns swap off**, which the kubelet requires (GCE Ubuntu images have no swap, but the script makes sure)
-- **disables `ufw`**, because filtering is done by the GCP firewall and a second host firewall would only block RKE2 ports
 
 ### 1.5 Network
 
@@ -159,65 +140,40 @@ The startup script also:
 
 ---
 
-## 2. Prerequisites
+## 2. Preparing the VMs
 
-On the admin laptop:
-
-| Tool | Used for |
-|---|---|
-| [Terraform](https://developer.hashicorp.com/terraform/install) ≥ 1.5 | creating the GCP infrastructure |
-| [gcloud CLI](https://cloud.google.com/sdk/docs/install) | logging in to GCP |
-| [kubectl](https://kubernetes.io/docs/tasks/tools/) | managing the cluster |
-| bash + ssh + openssl (Git Bash on Windows) | running the RKE2 bootstrap |
-| SSH key pair (`~/.ssh/id_ed25519.pub`) | access to the VMs |
-
-GCP: a project with billing enabled. I used a dedicated project, `rke2-devsecops`, so billing is isolated and everything can be deleted together.
+Before installing RKE2, each VM was prepared once, on first boot:
 
 ```bash
-gcloud auth login
-gcloud auth application-default login      # credentials for Terraform
-gcloud config set project rke2-devsecops
+# 1. Move /var to the dedicated 60 GB disk (only format it if it has no filesystem yet)
+DISK=/dev/disk/by-id/google-var-disk
+blkid $DISK || mkfs.ext4 -L var $DISK
+mount $DISK /mnt && cp -ax /var/. /mnt/ && umount /mnt
+echo "UUID=$(blkid -s UUID -o value $DISK) /var ext4 defaults,nofail 0 2" >> /etc/fstab
+reboot
+
+# 2. Swap off (a kubelet requirement)
+swapoff -a && sed -i '/\sswap\s/ s/^#*/#/' /etc/fstab
+
+# 3. Host firewall off: filtering is done by the GCP firewall
+ufw disable
 ```
 
----
+- **Why on first boot:** nothing is installed yet, so no live data is copied when `/var` moves.
+- **Why disable `ufw`:** a second host firewall would only block RKE2 ports that the GCP firewall already controls.
 
-## 3. Provisioning the VMs (Terraform)
-
-```bash
-cd terraform
-cp terraform.tfvars.example terraform.tfvars
-# edit: project_id, admin_cidrs/access_cidrs = ["<your-public-ip>/32"]
-terraform init
-terraform plan -out=tfplan      # review: 18 resources
-terraform apply tfplan
-terraform output                # IPs + ssh commands
-```
-
-What gets created:
-- the Compute API, VPC, subnet and 4 firewall rules
-- 3 internal and 3 external static IPs
-- 3 data disks
-- 3 VMs
-
-After about 2 minutes, each VM has rebooted once with `/var` on its own disk. Check with:
-```bash
-ssh rke2admin@<node-ip> "df -h /var && lsblk"
-```
+Result on all 3 nodes:
 ```
 rke2-node-1: var=[/dev/sdb 58.8G] swap_devices=0 ufw=[Status: inactive] cpu=2 mem=11G os=24.04 cgroup=cgroup2fs
 rke2-node-2: var=[/dev/sdb 58.8G] swap_devices=0 ufw=[Status: inactive] cpu=2 mem=11G os=24.04 cgroup=cgroup2fs
 rke2-node-3: var=[/dev/sdb 58.8G] swap_devices=0 ufw=[Status: inactive] cpu=2 mem=11G os=24.04 cgroup=cgroup2fs
 ```
 
-**Design notes:**
-- `lifecycle { ignore_changes = [metadata_startup_script] }`: in the Google provider, changing the startup script **forces VM replacement**, which would destroy the cluster. The script only matters on first boot, so later edits apply only to newly created VMs.
-- `allow_stopping_for_update = true` lets Terraform resize a VM (stop, change, start) without recreating it.
-
 ---
 
-## 4. Installing RKE2
+## 3. Installing RKE2
 
-### 4.1 Version
+### 3.1 Version
 
 **RKE2 `v1.36.5+rke2r1`**, the current **stable** channel at build time.
 - I chose *stable* over *latest* (v1.37.1 at the time) because it has had more real-world use.
@@ -231,7 +187,9 @@ rke2-node-3: var=[/dev/sdb 58.8G] swap_devices=0 ufw=[Status: inactive] cpu=2 me
 
 **Container runtime:** RKE2 **bundles containerd 2.3.4-k3s1**, built and tested for this Kubernetes version. This meets the requirement for a matching containerd version. **Docker is not installed**: Kubernetes removed dockershim in v1.24, so Docker isn't needed as the runtime.
 
-### 4.2 One command
+### 3.2 One command
+
+Prerequisites on the laptop: bash, ssh and openssl (Git Bash on Windows), plus SSH access to the 3 VMs.
 
 ```bash
 cd rke2
@@ -249,7 +207,7 @@ cd rke2
 | 5 | Same for **node-3** | Nodes join **one at a time**, so etcd grows 1 → 2 → 3 members cleanly. Adding members in parallel can break quorum during the join |
 | 6 | Copies `/etc/rancher/rke2/rke2.yaml` from node-1, replaces `127.0.0.1` with node-1's public IP, and renames the context to `rke2-devsecops` | The admin kubeconfig for the laptop |
 
-### 4.3 What happens on each node
+### 3.3 What happens on each node
 
 [`install-rke2-server.sh`](rke2/install-rke2-server.sh) writes `/etc/rancher/rke2/config.yaml`, installs RKE2 and starts the `rke2-server` service:
 
@@ -286,14 +244,14 @@ etcd-snapshot-retention: 5
 | `node-name` | GCE hostnames are long FQDNs (`rke2-node-1.us-central1-a.c.rke2-devsecops.internal`); short names are easier to read |
 | `node-ip` | Kubelet and inter-node traffic uses the private network |
 | `node-external-ip` | The public IP shows up as the node's `EXTERNAL-IP`, which is useful for NodePort/ingress access |
-| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 8](#8-issues-hit-during-the-build-and-fixes)) |
+| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 7](#7-issues-hit-during-the-build-and-fixes)) |
 | `write-kubeconfig-mode: "0644"` | Lets the admin user run `kubectl` on the node without sudo (acceptable in a lab; tighten for production) |
 | `tls-san` | Every node IP, internal and external, is in the API certificate, so kubectl works against any node from anywhere |
 | `etcd-snapshot-*` | Scheduled etcd backups every 12 hours, keeping the last 5. These are RKE2's defaults, written out so they're documented and easy to change |
 
 The script also adds `/etc/profile.d/rke2.sh`, so every SSH user gets `kubectl` and `crictl` on the PATH with `KUBECONFIG` already set.
 
-### 4.4 Manual equivalent
+### 3.4 Manual equivalent
 
 The same steps without the bootstrap script:
 
@@ -310,7 +268,7 @@ sudo /var/lib/rancher/rke2/bin/kubectl --kubeconfig /etc/rancher/rke2/rke2.yaml 
 
 ---
 
-## 5. Accessing the cluster
+## 4. Accessing the cluster
 
 **From the laptop:** merge the kubeconfig into `~/.kube/config` (back up the existing file first):
 ```bash
@@ -328,7 +286,7 @@ kubectl get nodes          # PATH and KUBECONFIG come from /etc/profile.d/rke2.s
 
 ---
 
-## 6. Verification
+## 5. Verification
 
 **All 3 nodes are Ready, on the pinned versions:**
 ```
@@ -368,7 +326,7 @@ $ curl -s -o /dev/null -w "%{http_code}" http://<node-ip>/
 
 ---
 
-## 7. RKE2 installation defaults
+## 6. RKE2 installation defaults
 
 The task asks to pay attention to the installation defaults. Here's what RKE2 v1.36 ships and what I decided:
 
@@ -385,20 +343,19 @@ The task asks to pay attention to the installation defaults. Here's what RKE2 v1
 
 ---
 
-## 8. Issues hit during the build and fixes
+## 7. Issues hit during the build and fixes
 
 | # | Symptom | Root cause | Fix |
 |---|---|---|---|
-| 1 | `terraform apply` would exceed quota | pd-balanced counts toward the regional `SSD_TOTAL_GB` quota (250 GB); 3 × (30 + 60) = 270 GB | Boot disk reduced to 20 GB (240 GB total) |
+| 1 | Disk creation would exceed quota | pd-balanced counts toward the regional `SSD_TOTAL_GB` quota (250 GB); 3 × (30 + 60) = 270 GB | Boot disk reduced to 20 GB (240 GB total) |
 | 2 | Console "SSH" button failed: *"Connection to VM is refused"* | The console connects through IAP from 35.235.240.0/20, which the firewall didn't allow | Added the `rke2-allow-iap-ssh` rule |
-| 3 | Editing the startup script would **replace all 3 VMs** | `metadata_startup_script` is a force-new attribute in the Google provider | `lifecycle { ignore_changes = [metadata_startup_script] }` |
-| 4 | Nodes registered as `rke2-node-1.us-central1-a.c.rke2-devsecops.internal` | GCE sets the hostname to the full internal FQDN | `node-name: $(hostname -s)`. Node-1 was reinstalled while the cluster was still empty, since renaming an etcd member later is painful |
-| 5 | **Node `NotReady`; Canal stuck in `Init`.** Log: `dial tcp 10.43.0.1:443: i/o timeout` | Setting `node-external-ip` makes RKE2 **advertise the API server on the public IP**. The in-cluster `kubernetes` Service then DNATed to `34.56.31.129:6443`. Pod traffic hairpinned out through GCP's external NAT and came back from an IP the firewall doesn't allow, so it was dropped | `advertise-address: <internal IP>`. In-cluster API traffic now stays on the private network, which is also better for security and latency |
-| 6 | `kubectl: command not found` when SSHing to a node | The install script's `umask 077` (set so the token file is root-only) also made `/etc/profile.d/rke2.sh` root-only | Explicit `chmod 644` on the profile script |
+| 3 | Nodes registered as `rke2-node-1.us-central1-a.c.rke2-devsecops.internal` | GCE sets the hostname to the full internal FQDN | `node-name: $(hostname -s)`. Node-1 was reinstalled while the cluster was still empty, since renaming an etcd member later is painful |
+| 4 | **Node `NotReady`; Canal stuck in `Init`.** Log: `dial tcp 10.43.0.1:443: i/o timeout` | Setting `node-external-ip` makes RKE2 **advertise the API server on the public IP**. The in-cluster `kubernetes` Service then DNATed to `34.56.31.129:6443`. Pod traffic hairpinned out through GCP's external NAT and came back from an IP the firewall doesn't allow, so it was dropped | `advertise-address: <internal IP>`. In-cluster API traffic now stays on the private network, which is also better for security and latency |
+| 5 | `kubectl: command not found` when SSHing to a node | The install script's `umask 077` (set so the token file is root-only) also made `/etc/profile.d/rke2.sh` root-only | Explicit `chmod 644` on the profile script |
 
 ---
 
-## 9. Security notes
+## 8. Security notes
 
 The task doesn't require hardening, but these choices and recommendations apply.
 
@@ -409,7 +366,7 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - The join token is random, git-ignored, root-only on the nodes, and never passed on a command line.
 - API server traffic inside the cluster stays on the private network (`advertise-address`).
 - Scheduled etcd snapshots.
-- Secrets and state are kept out of git (`.gitignore`).
+- Secrets are kept out of git (`.gitignore`).
 
 **Recommended for production:**
 - Close public 22 and 6443 entirely; use IAP or a bastion only.
@@ -418,16 +375,15 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - Rotate the join token. Give other users least-privilege kubeconfigs (RBAC) instead of the admin one.
 - NetworkPolicies (Canal supports them) and Pod Security Admission (`restricted`).
 - `write-kubeconfig-mode: "0600"`.
-- Terraform state in a GCS backend with locking; unattended OS security upgrades.
+- Unattended OS security upgrades.
 
-## 10. Limitations and future improvements
+## 9. Limitations and future improvements
 
 - **There's no single API endpoint.** The kubeconfig points at node-1's IP. If node-1 is down the cluster keeps working (2/3 quorum), but kubectl must be repointed at node-2 or node-3. Fix: a GCP TCP load balancer or a DNS name in front of 6443 and 9345, also used as the join address.
-- Node IPs are hard-coded in `bootstrap-cluster.sh`. They could be read from `terraform output -json`, or the install could be moved to Ansible.
-- Terraform state is local; a GCS remote backend is the team-grade option.
+- Node IPs are hard-coded in `bootstrap-cluster.sh`; the install could be moved to Ansible.
 - The cluster runs in a single zone (`us-central1-a`). Spreading nodes across zones would survive a zone outage.
 
-## 11. Cost and teardown
+## 10. Cost
 
 Approximate cost in us-central1, running 24/7:
 
@@ -438,7 +394,4 @@ Approximate cost in us-central1, running 24/7:
 | 3 static external IPs (in use) | about $11 |
 | **Total** | **about $210** |
 
-Stopping the VMs saves the compute cost; disks and IPs are still billed. To remove everything:
-```bash
-cd terraform && terraform destroy
-```
+Stopping the VMs saves the compute cost; disks and IPs are still billed.
