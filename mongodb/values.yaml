@@ -38,6 +38,9 @@ service:
   type: NodePort
   nodePorts:
     mongodb: 30017
+  # Chart default is Local: the port would only answer on the node running the pod.
+  # Cluster: every node's IP forwards to MongoDB, so the address doesn't depend on pod placement.
+  externalTrafficPolicy: Cluster
 
 volumePermissions:
   image:
