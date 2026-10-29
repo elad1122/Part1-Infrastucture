@@ -7,6 +7,7 @@ It documents:
 1. **The VM resources I chose, and why** (compute, disks, network, OS)
 2. **How RKE2 was installed**, step by step, with every config option explained
 3. **How Argo CD was installed** with its Helm chart and exposed with DNS
+4. **How MongoDB was deployed** through Argo CD (GitOps) with the Bitnami chart
 
 ---
 
@@ -20,10 +21,11 @@ It documents:
 - [5. Verification](#5-verification)
 - [6. RKE2 installation defaults](#6-rke2-installation-defaults)
 - [7. Argo CD](#7-argo-cd)
-- [8. Issues hit during the build and fixes](#8-issues-hit-during-the-build-and-fixes)
-- [9. Security notes](#9-security-notes)
-- [10. Limitations and future improvements](#10-limitations-and-future-improvements)
-- [11. Cost](#11-cost)
+- [8. MongoDB](#8-mongodb)
+- [9. Issues hit during the build and fixes](#9-issues-hit-during-the-build-and-fixes)
+- [10. Security notes](#10-security-notes)
+- [11. Limitations and future improvements](#11-limitations-and-future-improvements)
+- [12. Cost](#12-cost)
 
 ---
 
@@ -56,8 +58,14 @@ It documents:
 ├── rke2/
 │   ├── install-rke2-server.sh  # installs + configures ONE RKE2 server node (idempotent)
 │   └── bootstrap-cluster.sh    # builds the whole cluster from the laptop
-└── argocd/
-    └── values.yaml             # Helm values for the Argo CD chart
+├── argocd/
+│   ├── values.yaml             # Helm values for the Argo CD chart
+│   ├── repositories/
+│   │   └── bitnami-oci.yaml    # declarative repo: Bitnami OCI Helm registry
+│   └── apps/
+│       └── mongodb.yaml        # Argo CD Application for MongoDB
+└── mongodb/
+    └── values.yaml             # Helm values for the Bitnami MongoDB chart (read by Argo CD from Git)
 ```
 
 Never committed (git-ignored): the RKE2 join token and kubeconfig files.
@@ -248,7 +256,7 @@ etcd-snapshot-retention: 5
 | `node-name` | GCE hostnames are long FQDNs (`rke2-node-1.us-central1-a.c.rke2-devsecops.internal`); short names are easier to read |
 | `node-ip` | Kubelet and inter-node traffic uses the private network |
 | `node-external-ip` | The public IP shows up as the node's `EXTERNAL-IP`, which is useful for NodePort/ingress access |
-| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 8](#8-issues-hit-during-the-build-and-fixes)) |
+| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 9](#9-issues-hit-during-the-build-and-fixes)) |
 | `write-kubeconfig-mode: "0644"` | Lets the admin user run `kubectl` on the node without sudo (acceptable in a lab; tighten for production) |
 | `tls-san` | Every node IP, internal and external, is in the API certificate, so kubectl works against any node from anywhere |
 | `etcd-snapshot-*` | Scheduled etcd backups every 12 hours, keeping the last 5. These are RKE2's defaults, written out so they're documented and easy to change |
@@ -476,7 +484,163 @@ The Ingress `ADDRESS` column is empty. That's expected: Traefik binds hostPorts 
 
 ---
 
-## 8. Issues hit during the build and fixes
+## 8. MongoDB
+
+| Item | Value |
+|---|---|
+| Chart | Bitnami `mongodb` **16.5.45** (pinned), from `oci://registry-1.docker.io/bitnamicharts` |
+| MongoDB version | **8.0.13** |
+| Deployed by | **Argo CD** (Application [`argocd/apps/mongodb.yaml`](argocd/apps/mongodb.yaml)) |
+| Values | [`mongodb/values.yaml`](mongodb/values.yaml) |
+| Namespace | `default`, as the task requires |
+| Architecture | **standalone** |
+| External access | **NodePort 30017** on every node: `34.56.31.129`, `136.65.198.33`, `34.55.18.181` |
+| Metrics | Built-in exporter, **NodePort 30216** (`/metrics`) |
+
+### 8.1 How it's deployed (GitOps)
+
+```
+GitHub repo (this repo)                Bitnami OCI registry
+  mongodb/values.yaml  ─┐          ┌─  bitnamicharts/mongodb:16.5.45
+                        ▼          ▼
+                 Argo CD Application "mongodb"  (multi-source)
+                        │  helm template + kubectl apply, auto-sync
+                        ▼
+                 namespace default: Deployment, Services, NetworkPolicy, PDB
+```
+
+- **Multi-source Application:** the chart comes from Bitnami's OCI registry, and the values file comes from this Git repo (`ref: values` → `$values/mongodb/values.yaml`). Changing the deployment means changing `mongodb/values.yaml` in Git. Argo CD notices and applies it; no one runs `helm` by hand.
+- **Sync policy:** `automated` with `prune` (resources removed from Git are deleted from the cluster) and `selfHeal` (manual changes in the cluster are reverted to match Git). `ServerSideApply` gives cleaner diffs.
+- **Helm version:** Argo CD renders the chart with its bundled Helm (`helm template`). In Argo CD v3.5.6 that's **Helm v4.2.1** (checked with `kubectl -n argocd exec deploy/argocd-repo-server -- helm version`), which satisfies the "Helm 3 or 4" requirement.
+- **Declarative repository:** [`argocd/repositories/bitnami-oci.yaml`](argocd/repositories/bitnami-oci.yaml) is a Secret labelled `argocd.argoproj.io/secret-type: repository` that registers the public OCI registry (`enableOCI: "true"`). It holds no credentials, so it's safe in Git.
+
+**Steps performed:**
+```bash
+# 1. Values + Application committed and pushed first (Argo CD reads the values from GitHub)
+git push origin main
+
+# 2. Credentials Secret, created out-of-band (never in Git; values are random and never printed)
+kubectl -n default create secret generic mongodb-auth \
+  --from-literal=mongodb-root-password="$(openssl rand -hex 16)" \
+  --from-literal=mongodb-replica-set-key="$(openssl rand -hex 32)"
+
+# 3. Register the OCI repo and the Application with Argo CD
+kubectl apply -f argocd/repositories/bitnami-oci.yaml -f argocd/apps/mongodb.yaml
+
+# 4. Argo CD syncs automatically (or force a refresh right away):
+kubectl -n argocd annotate application mongodb argocd.argoproj.io/refresh=hard --overwrite
+```
+
+### 8.2 Requirements and how each is met
+
+| Requirement | How |
+|---|---|
+| Deploy with Helm (3 or 4), Argo CD allowed | Argo CD Application with the Bitnami Helm chart |
+| Bitnami MongoDB **8.0.13** | Chart **16.5.45** is the chart release whose appVersion is 8.0.13; image `bitnamilegacy/mongodb:8.0.13-debian-12-r0` |
+| Standalone or replicaSet | **Standalone** (see 8.3 for why) |
+| Explicit CPU/memory requests + limits | `resources` for MongoDB and `metrics.resources` for the exporter (8.4) |
+| Exposed outside the cluster with a NodePort Service | `service.type: NodePort`, `nodePorts.mongodb: 30017` |
+| No persistence | `persistence.enabled: false` (data in an `emptyDir`) |
+| No arbiter | `arbiter.enabled: false` |
+| Expose the built-in metrics exporter | `metrics.enabled: true` (exporter sidecar), plus a fixed NodePort 30216 |
+
+### 8.3 Why standalone (and what happened with replicaSet)
+
+I first deployed a **3-member replicaSet** (no arbiter, hard anti-affinity so there's one member per node). With no persistence, a replicaSet has a real advantage: a restarted member re-syncs its data from the other two, while a standalone instance loses everything when its pod is recreated.
+
+**The third member never scheduled:**
+```
+pod/mongodb-2   FailedScheduling   0/3 nodes are available: 3 Insufficient cpu.
+```
+
+The cause is CPU **requests** (reserved capacity), not actual usage. The scheduler only places a pod where its requests fit. At that point each 2-vCPU node already had most of its CPU reserved:
+
+```
+rke2-node-1: cpu requests 1875m (93%)
+rke2-node-2: cpu requests 1750m (87%)
+rke2-node-3: cpu requests 1850m (92%)
+```
+
+- Every node is an RKE2 **server**, so each one runs its own kube-apiserver, etcd, controller-manager, scheduler, kube-proxy and Canal, and each of those requests CPU.
+- Argo CD adds 500m.
+- Each MongoDB member needs 300m (250m for mongod plus 50m for the exporter).
+
+So the cluster ran out of *reservable* CPU while real usage was low.
+
+**Decision: standalone.** The task allows either architecture. Standalone fits the current nodes without lowering requests below sensible values. To run the replicaSet, the options would be:
+- 4-vCPU nodes (`e2-custom-4-12288`), about +$50/month per node
+- or lowering the requests of other components
+
+The replicaSet values are in the Git history (commit `a391784`).
+
+### 8.4 Values explained
+
+| Setting | Value | Why |
+|---|---|---|
+| `image.repository` + tags | `bitnamilegacy/*` | Bitnami moved versioned images to `bitnamilegacy` (the task links it). `docker.io/bitnami/mongodb:8.0.13-debian-12-r0` no longer exists (404) |
+| `global.security.allowInsecureImages` | `true` | Bitnami charts refuse non-default image repositories unless this is set. It only skips the chart's image-name check; the images are the same official builds |
+| `architecture` | `standalone` | See 8.3 |
+| `auth.existingSecret` | `mongodb-auth` | **Argo CD renders charts with `helm template`, which has no access to the cluster** (no `lookup`). Bitnami's auto-generated passwords would be re-randomized on every render, so Argo CD would keep showing changes and rotating the password. A pre-created Secret keeps credentials stable and out of Git |
+| `resources` | requests 250m / 512Mi, limits 500m / 1Gi | Guaranteed baseline for a small database. The 1Gi limit lets MongoDB size its WiredTiger cache from the container limit (about 256 MB), so it can't use more memory than it's allowed |
+| `metrics.resources` | requests 50m / 64Mi, limits 100m / 128Mi | The exporter is lightweight |
+| `persistence.enabled` | `false` | Not required; data lives in an `emptyDir` on the node's `/var` |
+| `service.type` / `nodePorts.mongodb` | `NodePort` / `30017` | Required external exposure; a fixed port gives a stable address |
+| `service.externalTrafficPolicy` | `Cluster` | The chart default `Local` only answers on the node running the pod. `Cluster` makes **every** node's IP work, so the address doesn't depend on where the pod is scheduled |
+| `metrics.enabled` | `true` | Runs the built-in `mongodb-exporter` sidecar. The chart's `mongodb-metrics` ClusterIP Service carries `prometheus.io/scrape` annotations for in-cluster Prometheus |
+| `extraDeploy` → `mongodb-metrics-external` | NodePort `30216` | The chart's metrics Service template has no `nodePort` setting, so a small extra Service exposes the exporter on a fixed port outside the cluster |
+| `arbiter.enabled` | `false` | Required; it's also irrelevant in standalone mode, but stated explicitly |
+
+### 8.5 Connecting
+
+From outside the cluster (the source IP must be allowed by the `rke2-allow-access` firewall rule):
+```bash
+mongosh "mongodb://root:<password>@34.56.31.129:30017/?authSource=admin"
+```
+Any node's IP works (`136.65.198.33`, `34.55.18.181`). Get the root password with:
+```bash
+kubectl -n default get secret mongodb-auth -o jsonpath="{.data.mongodb-root-password}" | base64 -d
+```
+From inside the cluster: `mongodb://root:<password>@mongodb.default.svc.cluster.local:27017/?authSource=admin`
+
+Metrics: `curl http://34.56.31.129:30216/metrics`
+
+### 8.6 Verification
+
+```
+$ kubectl -n argocd get application mongodb
+NAME      SYNC STATUS   HEALTH STATUS
+mongodb   Synced        Healthy
+
+$ kubectl -n default get pods -l app.kubernetes.io/name=mongodb -o wide
+mongodb-5c6c746b59-x7wjt   2/2   Running   rke2-node-3      # mongodb + metrics containers
+
+$ kubectl -n default get svc -l app.kubernetes.io/instance=mongodb
+mongodb                    NodePort    10.43.60.166    27017:30017/TCP
+mongodb-metrics            ClusterIP   10.43.51.117    9216/TCP
+mongodb-metrics-external   NodePort    10.43.244.180   9216:30216/TCP
+
+Resources applied:
+mongodb: req={"cpu":"250m","memory":"512Mi"} lim={"cpu":"500m","memory":"1Gi"}
+metrics: req={"cpu":"50m","memory":"64Mi"}  lim={"cpu":"100m","memory":"128Mi"}
+
+Authenticated as root:  version=8.0.13 isWritablePrimary=true, write+read=1
+Unauthenticated:        listDatabases -> rejected: Unauthorized
+
+NodePort 30017 from the laptop, every node:
+34.56.31.129  -> "It looks like you are trying to access MongoDB over HTTP on the native driver port."
+136.65.198.33 -> (same)
+34.55.18.181  -> (same)
+
+Metrics NodePort 30216:
+mongodb_version_info{edition="Community",mongodb="8.0.13",vendor="MongoDB"} 1
+3377 mongodb_* series exported
+```
+
+The HTTP reply on 30017 is MongoDB's own message when it's hit over HTTP, which proves the NodePort reaches mongod from outside the cluster.
+
+---
+
+## 9. Issues hit during the build and fixes
 
 | # | Symptom | Root cause | Fix |
 |---|---|---|---|
@@ -485,10 +649,13 @@ The Ingress `ADDRESS` column is empty. That's expected: Traefik binds hostPorts 
 | 3 | Nodes registered as `rke2-node-1.us-central1-a.c.rke2-devsecops.internal` | GCE sets the hostname to the full internal FQDN | `node-name: $(hostname -s)`. Node-1 was reinstalled while the cluster was still empty, since renaming an etcd member later is painful |
 | 4 | **Node `NotReady`; Canal stuck in `Init`.** Log: `dial tcp 10.43.0.1:443: i/o timeout` | Setting `node-external-ip` makes RKE2 **advertise the API server on the public IP**. The in-cluster `kubernetes` Service then DNATed to `34.56.31.129:6443`. Pod traffic hairpinned out through GCP's external NAT and came back from an IP the firewall doesn't allow, so it was dropped | `advertise-address: <internal IP>`. In-cluster API traffic now stays on the private network, which is also better for security and latency |
 | 5 | `kubectl: command not found` when SSHing to a node | The install script's `umask 077` (set so the token file is root-only) also made `/etc/profile.d/rke2.sh` root-only | Explicit `chmod 644` on the profile script |
+| 6 | MongoDB replicaSet: `mongodb-2` stuck `Pending`, *"0/3 nodes are available: 3 Insufficient cpu"* | CPU **requests** on each 2-vCPU node were already about 90% reserved (RKE2 control plane on every server node, plus Argo CD) | Switched to the standalone architecture (see [8.3](#83-why-standalone-and-what-happened-with-replicaset)) |
+| 7 | MongoDB NodePort only answered on one node | The chart defaults `service.externalTrafficPolicy: Local` | Set to `Cluster`, so every node's IP works |
+| 8 | Bitnami image `bitnami/mongodb:8.0.13-debian-12-r0` not found | Bitnami moved versioned images to `bitnamilegacy` | Overrode all image repositories, plus `global.security.allowInsecureImages: true` |
 
 ---
 
-## 9. Security notes
+## 10. Security notes
 
 The task doesn't require hardening, but these choices and recommendations apply.
 
@@ -501,6 +668,7 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - Scheduled etcd snapshots.
 - Secrets are kept out of git (`.gitignore`).
 - Argo CD is in its own namespace, with the web terminal (`exec`) disabled. The initial admin secret is meant to be deleted after the first password change.
+- MongoDB has authentication enabled; unauthenticated access is rejected. Its credentials live in a Secret created out-of-band with random values, not in Git and not in the chart values.
 
 **Recommended for production:**
 - Close public 22 and 6443 entirely; use IAP or a bastion only.
@@ -511,16 +679,23 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - `write-kubeconfig-mode: "0600"`.
 - Unattended OS security upgrades.
 - Argo CD: SSO through Dex/OIDC instead of the shared admin user, RBAC roles per team, and a trusted TLS certificate (cert-manager + Let's Encrypt with DNS-01, or a corporate CA).
+- MongoDB:
+  - Manage the credentials Secret with **Sealed Secrets** or **External Secrets** (e.g. GCP Secret Manager), so it's also GitOps-managed.
+  - Use an application user with least privilege instead of `root`.
+  - Enable TLS on the MongoDB port.
+  - Restrict NodePort access to known client IPs (already limited by the firewall).
 
-## 10. Limitations and future improvements
+## 11. Limitations and future improvements
 
 - **There's no single API endpoint.** The kubeconfig points at node-1's IP. If node-1 is down the cluster keeps working (2/3 quorum), but kubectl must be repointed at node-2 or node-3. Fix: a GCP TCP load balancer or a DNS name in front of 6443 and 9345, also used as the join address.
 - Node IPs are hard-coded in `bootstrap-cluster.sh`; the install could be moved to Ansible.
 - The cluster runs in a single zone (`us-central1-a`). Spreading nodes across zones would survive a zone outage.
 - **Argo CD runs one replica of each component.** For HA: the chart's `redis-ha`, 2+ replicas of server and repo-server, and controller sharding.
 - **The Argo CD hostname is tied to node-1's IP** through nip.io. If node-1 is down, the UI is still reachable through another node's IP, but not by that name. A real DNS name with several A records, or a load balancer, would fix this.
+- **MongoDB is a single instance with no persistence.** Any pod restart (node reboot, eviction, upgrade) loses all data. For production: a 3-member replicaSet (needs about 1 more vCPU per node, see 8.3) and persistent volumes (a StorageClass such as local-path or the GCE PD CSI driver), plus backups.
+- **CPU requests are the real capacity limit** on 2-vCPU server nodes. Running RKE2's control plane on all 3 nodes reserves most of the CPU, so 4-vCPU nodes would be the next step for more workloads.
 
-## 11. Cost
+## 12. Cost
 
 Approximate cost in us-central1, running 24/7:
 
