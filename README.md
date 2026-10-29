@@ -6,6 +6,7 @@ Every node runs **control-plane + etcd + worker**, as the task requires.
 It documents:
 1. **The VM resources I chose, and why** (compute, disks, network, OS)
 2. **How RKE2 was installed**, step by step, with every config option explained
+3. **How Argo CD was installed** with its Helm chart and exposed with DNS
 
 ---
 
@@ -18,10 +19,11 @@ It documents:
 - [4. Accessing the cluster](#4-accessing-the-cluster)
 - [5. Verification](#5-verification)
 - [6. RKE2 installation defaults](#6-rke2-installation-defaults)
-- [7. Issues hit during the build and fixes](#7-issues-hit-during-the-build-and-fixes)
-- [8. Security notes](#8-security-notes)
-- [9. Limitations and future improvements](#9-limitations-and-future-improvements)
-- [10. Cost](#10-cost)
+- [7. Argo CD](#7-argo-cd)
+- [8. Issues hit during the build and fixes](#8-issues-hit-during-the-build-and-fixes)
+- [9. Security notes](#9-security-notes)
+- [10. Limitations and future improvements](#10-limitations-and-future-improvements)
+- [11. Cost](#11-cost)
 
 ---
 
@@ -51,9 +53,11 @@ It documents:
 
 ```
 .
-└── rke2/
-    ├── install-rke2-server.sh  # installs + configures ONE RKE2 server node (idempotent)
-    └── bootstrap-cluster.sh    # builds the whole cluster from the laptop
+├── rke2/
+│   ├── install-rke2-server.sh  # installs + configures ONE RKE2 server node (idempotent)
+│   └── bootstrap-cluster.sh    # builds the whole cluster from the laptop
+└── argocd/
+    └── values.yaml             # Helm values for the Argo CD chart
 ```
 
 Never committed (git-ignored): the RKE2 join token and kubeconfig files.
@@ -244,7 +248,7 @@ etcd-snapshot-retention: 5
 | `node-name` | GCE hostnames are long FQDNs (`rke2-node-1.us-central1-a.c.rke2-devsecops.internal`); short names are easier to read |
 | `node-ip` | Kubelet and inter-node traffic uses the private network |
 | `node-external-ip` | The public IP shows up as the node's `EXTERNAL-IP`, which is useful for NodePort/ingress access |
-| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 7](#7-issues-hit-during-the-build-and-fixes)) |
+| `advertise-address` | **Required here**: without it, `node-external-ip` also becomes the API server's advertised address, and pods can't reach the API (see [section 8](#8-issues-hit-during-the-build-and-fixes)) |
 | `write-kubeconfig-mode: "0644"` | Lets the admin user run `kubectl` on the node without sudo (acceptable in a lab; tighten for production) |
 | `tls-san` | Every node IP, internal and external, is in the API certificate, so kubectl works against any node from anywhere |
 | `etcd-snapshot-*` | Scheduled etcd backups every 12 hours, keeping the last 5. These are RKE2's defaults, written out so they're documented and easy to change |
@@ -343,7 +347,136 @@ The task asks to pay attention to the installation defaults. Here's what RKE2 v1
 
 ---
 
-## 7. Issues hit during the build and fixes
+## 7. Argo CD
+
+**URL: https://argocd.34.56.31.129.nip.io** (user `admin`)
+
+| Item | Value |
+|---|---|
+| Chart | `argo/argo-cd` **10.11.6** (pinned) |
+| Argo CD version | **v3.5.6** |
+| Helm | v4 |
+| Namespace | `argocd` |
+| Values | [`argocd/values.yaml`](argocd/values.yaml) |
+
+### 7.1 Installation
+
+```bash
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update argo
+
+# optional: render locally first to review exactly what will be created
+helm template argocd argo/argo-cd -n argocd -f argocd/values.yaml --version 10.11.6
+
+helm upgrade --install argocd argo/argo-cd \
+  -n argocd --create-namespace \
+  -f argocd/values.yaml --version 10.11.6 --wait
+```
+
+- **Why Helm:** it's the official, maintained chart. All settings live in one values file in git, so the install is declarative, reviewable and repeatable, and upgrades are a single `helm upgrade`.
+- **Why `upgrade --install`:** the same command works for the first install and for every later change, so it's idempotent.
+- **Why pin `--version`:** the chart and Argo CD version don't change unexpectedly when the install is rerun.
+
+### 7.2 Exposure with DNS
+
+```
+browser ──https──▶ argocd.34.56.31.129.nip.io ──▶ 34.56.31.129:443 (Traefik on node-1)
+                                                   └─▶ Service argocd-server:80 ──▶ argocd-server pod
+```
+
+- **DNS: [nip.io](https://nip.io) wildcard DNS.** Any name ending in `<IP>.nip.io` resolves to that IP, so `argocd.34.56.31.129.nip.io` resolves to node-1. This gives a real hostname for host-based Ingress routing without buying a domain or managing DNS records. With a real domain, the only change is `global.domain` plus an A record.
+- **Ingress: RKE2's bundled Traefik** (`ingressClassName: traefik`). Traefik runs on every node with hostPorts 80/443, so the URL works through any node's IP. That's why no LoadBalancer is needed (see [section 6](#6-rke2-installation-defaults)).
+- **TLS ends at Traefik, and argocd-server runs with `server.insecure: true`** (plain HTTP inside the cluster).
+  - Without this setting, argocd-server redirects every HTTP request to HTTPS. Behind an ingress that already handles TLS, that creates a redirect loop.
+  - This is the "SSL termination at ingress" option from the Argo CD ingress docs.
+- **Certificate:** Traefik's default **self-signed** certificate, so the browser shows a warning to click through.
+  - Let's Encrypt isn't possible here: it has to reach port 80 from the internet, and the firewall allows 80/443 from the admin IP only.
+- **Access:** limited by the GCP firewall to the admin IP. Reviewers' IPs must be added to the `rke2-allow-access` rule.
+- **gRPC / CLI:** the `argocd` CLI works through the same host with `--grpc-web`:
+  ```bash
+  argocd login argocd.34.56.31.129.nip.io --grpc-web --insecure --username admin
+  ```
+
+### 7.3 Values explained
+
+| Setting | Value | Why |
+|---|---|---|
+| `global.domain` | `argocd.34.56.31.129.nip.io` | Single source for the hostname (Ingress host and Argo CD's own URL) |
+| `configs.params.server.insecure` | `true` | TLS ends at Traefik (see 7.2) |
+| `configs.cm.exec.enabled` | `false` | The web terminal into pods isn't needed, so turning it off removes attack surface |
+| `server.ingress` | enabled, class `traefik` | Exposes the UI and API through RKE2's ingress controller |
+| `dex.enabled` | `false` | Dex provides SSO (GitHub/OIDC login), which isn't needed with the local admin user. It saves a pod and resources |
+| `notifications.enabled` | `false` | Slack/email notifications aren't needed |
+| `applicationSet` | kept | Useful for generating Applications later |
+| `*.resources` | explicit requests + limits | Predictable scheduling and protection against noisy neighbours on the shared nodes (see below) |
+
+**Resources per component:**
+
+| Component | Requests (CPU / mem) | Limits (CPU / mem) | Why |
+|---|---|---|---|
+| application-controller | 250m / 512Mi | 1 / 1Gi | Does the reconciling and caches cluster state, so it's the heaviest component |
+| repo-server | 100m / 256Mi | 1 / 1Gi | Renders Helm/Kustomize manifests; CPU spikes while rendering |
+| server | 50m / 128Mi | 500m / 512Mi | API + UI, light load |
+| applicationset-controller | 50m / 64Mi | 250m / 256Mi | Mostly idle |
+| redis | 50m / 64Mi | 250m / 256Mi | Cache only |
+| **Total** | **500m / 1Gi** | | About 8% of the cluster's 6 vCPU and 3% of its 36 GB |
+
+Measured usage right after install is far below the requests, which leaves room for real applications:
+```
+argocd-application-controller-0      1m   25Mi
+argocd-applicationset-controller     3m   29Mi
+argocd-redis                         3m    5Mi
+argocd-repo-server                   2m   19Mi
+argocd-server                        2m   43Mi
+```
+
+### 7.4 Namespace: `argocd` instead of `default`
+
+The task says to use `default` unless a separation is justified. Argo CD gets its own namespace because:
+- **Security isolation:** Argo CD holds high-value secrets (cluster credentials, Git repo credentials, the admin password) and has cluster-wide RBAC. Keeping it apart from application workloads means a RoleBinding or Secret access granted in `default` never reaches Argo CD's secrets.
+- **It's the upstream convention:** the official docs, CLI defaults and examples all assume `argocd`, which avoids surprises.
+- **Lifecycle:** the GitOps control plane can be upgraded, backed up or removed (`kubectl delete ns argocd`) without touching the workloads it manages.
+
+Applications that Argo CD deploys can still target `default`, as the task requires.
+
+### 7.5 First login
+
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
+```
+1. Log in at the URL as `admin` with that password.
+2. **Change the password** (User Info → Update Password, or `argocd account update-password`).
+3. Then delete the bootstrap secret, as the Getting Started guide recommends:
+   ```bash
+   kubectl -n argocd delete secret argocd-initial-admin-secret
+   ```
+
+### 7.6 Verification
+
+```
+$ kubectl -n argocd get pods -o wide
+argocd-application-controller-0                    1/1  Running    rke2-node-2
+argocd-applicationset-controller-68f484786c-j6bzp  1/1  Running    rke2-node-3
+argocd-redis-7fd56b4bb-djxn6                       1/1  Running    rke2-node-3
+argocd-redis-secret-init-lfxtw                     0/1  Completed  rke2-node-3
+argocd-repo-server-578fdff598-7kh96                1/1  Running    rke2-node-3
+argocd-server-76668b5bb8-qhksc                     1/1  Running    rke2-node-2
+
+$ kubectl -n argocd get ingress
+NAME            CLASS     HOSTS                        PORTS
+argocd-server   traefik   argocd.34.56.31.129.nip.io   80
+
+DNS   argocd.34.56.31.129.nip.io -> 34.56.31.129
+HTTP  200, HTTPS 200 (<title>Argo CD</title>)
+POST /api/v1/session (admin login) -> 200
+GET  /api/version -> "Version":"v3.5.6"
+```
+
+The Ingress `ADDRESS` column is empty. That's expected: Traefik binds hostPorts directly and doesn't publish a load-balancer address.
+
+---
+
+## 8. Issues hit during the build and fixes
 
 | # | Symptom | Root cause | Fix |
 |---|---|---|---|
@@ -355,7 +488,7 @@ The task asks to pay attention to the installation defaults. Here's what RKE2 v1
 
 ---
 
-## 8. Security notes
+## 9. Security notes
 
 The task doesn't require hardening, but these choices and recommendations apply.
 
@@ -367,6 +500,7 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - API server traffic inside the cluster stays on the private network (`advertise-address`).
 - Scheduled etcd snapshots.
 - Secrets are kept out of git (`.gitignore`).
+- Argo CD is in its own namespace, with the web terminal (`exec`) disabled. The initial admin secret is meant to be deleted after the first password change.
 
 **Recommended for production:**
 - Close public 22 and 6443 entirely; use IAP or a bastion only.
@@ -376,14 +510,17 @@ The task doesn't require hardening, but these choices and recommendations apply.
 - NetworkPolicies (Canal supports them) and Pod Security Admission (`restricted`).
 - `write-kubeconfig-mode: "0600"`.
 - Unattended OS security upgrades.
+- Argo CD: SSO through Dex/OIDC instead of the shared admin user, RBAC roles per team, and a trusted TLS certificate (cert-manager + Let's Encrypt with DNS-01, or a corporate CA).
 
-## 9. Limitations and future improvements
+## 10. Limitations and future improvements
 
 - **There's no single API endpoint.** The kubeconfig points at node-1's IP. If node-1 is down the cluster keeps working (2/3 quorum), but kubectl must be repointed at node-2 or node-3. Fix: a GCP TCP load balancer or a DNS name in front of 6443 and 9345, also used as the join address.
 - Node IPs are hard-coded in `bootstrap-cluster.sh`; the install could be moved to Ansible.
 - The cluster runs in a single zone (`us-central1-a`). Spreading nodes across zones would survive a zone outage.
+- **Argo CD runs one replica of each component.** For HA: the chart's `redis-ha`, 2+ replicas of server and repo-server, and controller sharding.
+- **The Argo CD hostname is tied to node-1's IP** through nip.io. If node-1 is down, the UI is still reachable through another node's IP, but not by that name. A real DNS name with several A records, or a load balancer, would fix this.
 
-## 10. Cost
+## 11. Cost
 
 Approximate cost in us-central1, running 24/7:
 

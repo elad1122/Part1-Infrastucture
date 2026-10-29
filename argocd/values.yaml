@@ -1,0 +1,56 @@
+# Argo CD – Helm values for chart argo/argo-cd 10.11.6 (Argo CD v3.5.6)
+#
+# helm upgrade --install argocd argo/argo-cd -n argocd --create-namespace \
+#   -f argocd/values.yaml --version 10.11.6 --wait
+
+global:
+  # nip.io wildcard DNS: resolves to 34.56.31.129 (node-1). Traefik runs on every node.
+  domain: argocd.34.56.31.129.nip.io
+
+configs:
+  params:
+    # TLS is terminated at Traefik; argocd-server serves plain HTTP inside the cluster.
+    # Without this, argocd-server redirects HTTP->HTTPS and loops behind the ingress.
+    server.insecure: true
+  cm:
+    # Disable the anonymous/web terminal features we don't need
+    exec.enabled: false
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: traefik   # RKE2's bundled ingress controller
+    # hostname defaults to global.domain
+    # tls: false -> Traefik serves HTTPS with its default self-signed cert.
+    # A real cert (Let's Encrypt) isn't possible: port 80 is closed to the internet.
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+controller:
+  # The application controller does the reconciling; it's the most memory-hungry component.
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+repoServer:
+  # Renders Helm/Kustomize manifests; CPU spikes during rendering.
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+
+applicationSet:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+redis:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+# Not needed for this exercise – disabled to save resources
+dex:
+  enabled: false            # SSO; we log in with the local admin user
+notifications:
+  enabled: false            # Slack/email notifications
