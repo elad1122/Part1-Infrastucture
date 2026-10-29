@@ -1,0 +1,97 @@
+# Bitnami MongoDB – Helm values for chart bitnami/mongodb 16.5.45 (MongoDB 8.0.13)
+# Deployed by Argo CD: see argocd/apps/mongodb.yaml
+
+global:
+  security:
+    # Required because the images below come from bitnamilegacy instead of the chart defaults
+    allowInsecureImages: true
+
+# Bitnami moved these versioned images to the bitnamilegacy repository (originals were removed)
+image:
+  registry: docker.io
+  repository: bitnamilegacy/mongodb
+  tag: 8.0.13-debian-12-r0
+
+# 3-member replica set, no arbiter
+architecture: replicaset
+replicaSetName: rs0
+replicaCount: 3
+arbiter:
+  enabled: false
+# One member per node, so losing a node loses only one member
+podAntiAffinityPreset: hard
+
+auth:
+  enabled: true
+  rootUser: root
+  # Pre-created Secret (not in git): mongodb-root-password, mongodb-replica-set-key.
+  # Chart-generated passwords would change on every Argo CD render (helm template has no lookup).
+  existingSecret: mongodb-auth
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits:   { cpu: 500m, memory: 1Gi }
+
+# No persistence required: data lives in an emptyDir. A restarted member re-syncs from the others.
+persistence:
+  enabled: false
+
+# Expose each member outside the cluster with its own NodePort Service.
+# Members advertise <node internal IP>:<nodePort>, so replication stays on the private network.
+externalAccess:
+  enabled: true
+  service:
+    type: NodePort
+    nodePorts: [30017, 30018, 30019]
+    # Cluster: any node's IP reaches any member (Local would only answer on the member's own node)
+    externalTrafficPolicy: Cluster
+  dnsCheck:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/os-shell
+      tag: 12-debian-12-r51
+  autoDiscovery:
+    image:
+      registry: docker.io
+      repository: bitnamilegacy/kubectl
+      tag: 1.33.4-debian-12-r0
+
+volumePermissions:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/os-shell
+    tag: 12-debian-12-r51
+
+# Built-in Prometheus exporter (sidecar in every member pod).
+# The chart's mongodb-metrics Service stays ClusterIP (with prometheus.io/* annotations for in-cluster
+# scraping); its template has no nodePort setting, so a fixed NodePort Service is added below.
+metrics:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/mongodb-exporter
+    tag: 0.47.0-debian-12-r1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 100m, memory: 128Mi }
+
+extraDeploy:
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: mongodb-metrics-external
+      labels:
+        app.kubernetes.io/name: mongodb
+        app.kubernetes.io/instance: mongodb
+        app.kubernetes.io/component: metrics
+    spec:
+      type: NodePort
+      selector:
+        app.kubernetes.io/name: mongodb
+        app.kubernetes.io/instance: mongodb
+        app.kubernetes.io/component: mongodb
+      ports:
+        - name: http-metrics
+          port: 9216
+          targetPort: metrics
+          nodePort: 30216

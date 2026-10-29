@@ -1,0 +1,14 @@
+# Registers Bitnami's OCI Helm registry with Argo CD (public – no credentials).
+# Declarative repository: Argo CD picks up Secrets with this label.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: repo-bitnami-oci
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  name: bitnamicharts
+  type: helm
+  url: registry-1.docker.io/bitnamicharts
+  enableOCI: "true"

@@ -1,0 +1,32 @@
+# Argo CD Application: Bitnami MongoDB 8.0.13 (chart 16.5.45) into the default namespace.
+# Multi-source: the chart comes from Bitnami's OCI registry, the values file from this Git repo,
+# so changing mongodb/values.yaml in Git is all it takes to change the deployment (GitOps).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: mongodb
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io   # deleting the Application removes its resources
+spec:
+  project: default
+  sources:
+    - repoURL: registry-1.docker.io/bitnamicharts
+      chart: mongodb
+      targetRevision: 16.5.45
+      helm:
+        releaseName: mongodb
+        valueFiles:
+          - $values/mongodb/values.yaml
+    - repoURL: https://github.com/elad1122/Part1-Infrastucture.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true      # remove resources that disappear from Git
+      selfHeal: true   # revert manual changes in the cluster
+    syncOptions:
+      - ServerSideApply=true
