@@ -12,19 +12,16 @@ image:
   repository: bitnamilegacy/mongodb
   tag: 8.0.13-debian-12-r0
 
-# 3-member replica set, no arbiter
-architecture: replicaset
-replicaSetName: rs0
-replicaCount: 3
+# Standalone (single instance). A 3-member replicaSet didn't fit: each 2-vCPU node already has
+# ~90% of its CPU *requested* by RKE2 control-plane pods and Argo CD, so the 3rd member stayed Pending.
+architecture: standalone
 arbiter:
-  enabled: false
-# One member per node, so losing a node loses only one member
-podAntiAffinityPreset: hard
+  enabled: false   # only relevant to replicaSet; explicit for clarity
 
 auth:
   enabled: true
   rootUser: root
-  # Pre-created Secret (not in git): mongodb-root-password, mongodb-replica-set-key.
+  # Pre-created Secret (not in git) with key mongodb-root-password.
   # Chart-generated passwords would change on every Argo CD render (helm template has no lookup).
   existingSecret: mongodb-auth
 
@@ -32,29 +29,15 @@ resources:
   requests: { cpu: 250m, memory: 512Mi }
   limits:   { cpu: 500m, memory: 1Gi }
 
-# No persistence required: data lives in an emptyDir. A restarted member re-syncs from the others.
+# No persistence required: data lives in an emptyDir and is lost when the pod is recreated.
 persistence:
   enabled: false
 
-# Expose each member outside the cluster with its own NodePort Service.
-# Members advertise <node internal IP>:<nodePort>, so replication stays on the private network.
-externalAccess:
-  enabled: true
-  service:
-    type: NodePort
-    nodePorts: [30017, 30018, 30019]
-    # Cluster: any node's IP reaches any member (Local would only answer on the member's own node)
-    externalTrafficPolicy: Cluster
-  dnsCheck:
-    image:
-      registry: docker.io
-      repository: bitnamilegacy/os-shell
-      tag: 12-debian-12-r51
-  autoDiscovery:
-    image:
-      registry: docker.io
-      repository: bitnamilegacy/kubectl
-      tag: 1.33.4-debian-12-r0
+# Expose MongoDB outside the cluster: NodePort on every node's IP, port 30017
+service:
+  type: NodePort
+  nodePorts:
+    mongodb: 30017
 
 volumePermissions:
   image:
