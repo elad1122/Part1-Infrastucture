@@ -15,6 +15,13 @@ configs:
   cm:
     # Disable the anonymous/web terminal features we don't need
     exec.enabled: false
+    # Argo CD's default Ingress health waits for a load-balancer address, but Traefik here binds
+    # hostPorts and publishes none, so every Ingress would stay "Progressing" forever.
+    resource.customizations.health.networking.k8s.io_Ingress: |
+      hs = {}
+      hs.status = "Healthy"
+      hs.message = "Served by Traefik on node hostPorts (no load-balancer address)"
+      return hs
 
 server:
   ingress:

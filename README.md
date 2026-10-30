@@ -412,6 +412,7 @@ browser ──https──▶ argocd.34.56.31.129.nip.io ──▶ 34.56.31.129:4
 | `global.domain` | `argocd.34.56.31.129.nip.io` | Single source for the hostname (Ingress host and Argo CD's own URL) |
 | `configs.params.server.insecure` | `true` | TLS ends at Traefik (see 7.2) |
 | `configs.cm.exec.enabled` | `false` | The web terminal into pods isn't needed, so turning it off removes attack surface |
+| `configs.cm.resource.customizations.health.networking.k8s.io_Ingress` | always `Healthy` | Argo CD's default check waits for a load-balancer address on the Ingress. Traefik here binds hostPorts and publishes none, so every Application with an Ingress would stay `Progressing` forever |
 | `server.ingress` | enabled, class `traefik` | Exposes the UI and API through RKE2's ingress controller |
 | `dex.enabled` | `false` | Dex provides SSO (GitHub/OIDC login), which isn't needed with the local admin user. It saves a pod and resources |
 | `notifications.enabled` | `false` | Slack/email notifications aren't needed |
