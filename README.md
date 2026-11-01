@@ -50,8 +50,6 @@ The boot disk is only 20 GB because once `/var` is off it, the OS itself uses on
 
 The task suggested RKE, k3s or RKE2, and I chose **RKE2** (version `v1.36.5+rke2r1`, the stable channel at the time).
 
-- **RKE1** reached end of life in July 2025, so I didn't want to build something new on it.
-- **k3s** is great, but it's designed for edge and lightweight setups. **RKE2** is Rancher's hardened distribution, with a CIS profile and FIPS support, and that felt closer to a real server cluster.
 - RKE2 ships its own **containerd** (2.3.4), already built and tested for its Kubernetes version. That takes care of the requirement for a matching container runtime. I didn't install Docker at all, since Kubernetes hasn't used Docker as a runtime since v1.24.
 - Turning every node into "control plane + etcd + worker" is simply a matter of joining it as a server.
 
