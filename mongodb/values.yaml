@@ -1,38 +1,41 @@
-
-
 global:
   security:
     allowInsecureImages: true
-
 
 image:
   registry: docker.io
   repository: bitnamilegacy/mongodb
   tag: 8.0.13-debian-12-r0
 
-architecture: standalone
+# 3 members, one per node
+architecture: replicaset
+replicaCount: 3
+podAntiAffinityPreset: hard   # never two members on the same node
+
 arbiter:
   enabled: false
 
 auth:
   enabled: true
   rootUser: root
-  existingSecret: mongodb-auth
+  existingSecret: mongodb-auth   # holds mongodb-root-password + mongodb-replica-set-key
+
 
 resources:
-  requests: { cpu: 250m, memory: 512Mi }
+  requests: { cpu: 100m, memory: 512Mi }
   limits:   { cpu: 500m, memory: 1Gi }
-
 
 persistence:
   enabled: false
 
 
-service:
-  type: NodePort
-  nodePorts:
-    mongodb: 30017
-  externalTrafficPolicy: Cluster
+externalAccess:
+  enabled: true
+  service:
+    type: NodePort
+    nodePorts: [30017, 30018, 30019]   # mongodb-0, -1, -2
+    externalTrafficPolicy: Cluster
+
 
 volumePermissions:
   image:
@@ -47,7 +50,7 @@ metrics:
     repository: bitnamilegacy/mongodb-exporter
     tag: 0.47.0-debian-12-r1
   resources:
-    requests: { cpu: 50m, memory: 64Mi }
+    requests: { cpu: 20m, memory: 64Mi }
     limits:   { cpu: 100m, memory: 128Mi }
 
 extraDeploy:
