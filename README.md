@@ -226,7 +226,27 @@ The task asks for everything to be in `default` unless there's a good reason to 
 
 ## MongoDB
 
-MongoDB is deployed **by Argo CD**, not by running Helm by hand. The Argo CD Application (`argocd/apps/mongodb.yaml`) takes the Bitnami chart from Bitnami's OCI registry and my values from this repo (`mongodb/values.yaml`). If I want to change something, I change the values file in Git and Argo CD applies it. Auto-sync with prune and self-heal is on, so the cluster always matches what's in Git. Argo CD renders the chart with its built-in Helm, which is Helm 4.2.1 in this version.
+MongoDB is deployed **by Argo CD**, not by running Helm by hand, and it's managed through the **app of apps** in [Part3-GitOps](https://github.com/elad1122/Part3-GitOps). That root app manages MongoDB's `AppProject` and `Application`. The Application takes the Bitnami chart from Bitnami's OCI registry and my values from this repo (`mongodb/values.yaml`). If I want to change something, I change the values file in Git and Argo CD applies it. Auto-sync with prune and self-heal is on, so the cluster always matches what's in Git. Argo CD renders the chart with its built-in Helm, which is Helm 4.2.1 in this version.
+
+| Where | What |
+|---|---|
+| This repo | `mongodb/values.yaml` and `argocd/repositories/bitnami-oci.yaml` |
+| Part3-GitOps | `root-app.yaml`, `mongodb/appproject.yaml`, `mongodb/application.yaml` |
+| Only on the cluster | The `mongodb-auth` Secret (never in Git) |
+
+To install it on a new cluster, create the two prerequisites and then apply the root app once:
+
+```bash
+kubectl apply -f argocd/repositories/bitnami-oci.yaml
+kubectl -n default create secret generic mongodb-auth \
+  --from-literal=mongodb-root-password="$(openssl rand -hex 16)" \
+  --from-literal=mongodb-replica-set-key="$(openssl rand -hex 32)"
+
+# from the Part3-GitOps repo
+kubectl apply -f root-app.yaml
+```
+
+**Why no Secret is needed to reach the Git repos:** Part2-Application is public, so Argo CD reads the sample app's chart without credentials; this repo and Part3-GitOps are public too. MongoDB's chart repo uses the Secret in this repo, `argocd/repositories/bitnami-oci.yaml`. It registers Bitnami's OCI registry with Argo CD, and because that registry is public, the Secret holds no password and is safe in Git.
 
 Here's how each requirement is covered:
 
