@@ -51,7 +51,6 @@ The boot disk is only 20 GB because once `/var` is off it, the OS itself uses on
 The task suggested RKE, k3s or RKE2, and I chose **RKE2** (version `v1.36.5+rke2r1`, the stable channel at the time).
 
 - **RKE1** reached end of life in July 2025, so I didn't want to build something new on it.
-- **k3s** is great, but it's designed for edge and lightweight setups. **RKE2** is Rancher's hardened distribution, with a CIS profile and FIPS support, and that felt closer to a real server cluster.
 - RKE2 ships its own **containerd** (2.3.4), already built and tested for its Kubernetes version. That takes care of the requirement for a matching container runtime. I didn't install Docker at all, since Kubernetes hasn't used Docker as a runtime since v1.24.
 - Turning every node into "control plane + etcd + worker" is simply a matter of joining it as a server.
 
@@ -182,22 +181,19 @@ Hardening wasn't part of the requirements, but I didn't want to leave the cluste
 
 - **Between the nodes**, everything is allowed, but only for machines tagged `rke2`. The nodes need a whole list of ports to talk to each other (join, API, etcd, kubelet, the Canal VXLAN). Opening exactly those would have been "cleaner" on paper, but it's also an easy way to end up with dropped packets that are hard to debug. Limiting the rule to tagged nodes keeps it safe.
 - **SSH (22) and the Kubernetes API (6443)** are open only to my own IP.
-- **HTTP/HTTPS and the NodePort range** (for the Argo CD UI and MongoDB) are open only to my IP, and I add reviewers' IPs when needed.
+
 
 I turned off `ufw` on the machines themselves. The cloud firewall already does the filtering, and a second firewall on the host would only block RKE2 ports that are already controlled one level up.
 
 **Other things:**
 
-- The VMs have **no cloud credentials** attached. The nodes never need to call the cloud provider's API, so a compromised node can't either.
 - The RKE2 join token is random, stays out of Git, and lives only in the RKE2 config file, which is readable only by root.
 - I set `advertise-address` to each node's internal IP, so traffic from pods to the API server stays on the private network.
 - etcd takes a snapshot every 12 hours and keeps the last 5.
 - Secrets (the token, kubeconfig and MongoDB passwords) never go into Git.
-- In Argo CD I disabled the web terminal into pods, and I delete the initial admin secret after changing the password.
 - MongoDB requires authentication, and its password is a random value in a Secret I created by hand.
 
 **If this were production**, I would also:
-- close 22 and 6443 to the internet completely and use a VPN or a bastion host
 - turn on RKE2's CIS profile and encryption of Secrets in etcd
 - copy etcd snapshots off the nodes
 - add NetworkPolicies and Pod Security Admission
@@ -225,7 +221,8 @@ The task asks for everything to be in `default` unless there's a good reason to 
 
 1. **It holds the keys to everything.** Argo CD stores cluster credentials, Git credentials and its admin password, and it has permissions across the whole cluster. If it shared a namespace with the applications, any permission given to apps in `default` (for example reading Secrets) would also reach Argo CD's secrets. A separate namespace keeps those apart.
 2. **It's what everyone expects.** The official docs, the CLI and basically every example assume Argo CD lives in `argocd`. Following that saves surprises later.
-3. **It has its own lifecycle.** I can upgrade, back up or even delete Argo CD without touching the workloads it manages.
+3. **It has its own lifecycle.** Argo CD runs out-of-band as a GitOps engine rather than an application wrapper. Isolating it in its own namespace ensures you can upgrade, back up, or entirely delete the deployment engine without affecting the uptime or configurations of the workloads it manages.
+
 
 ## MongoDB
 
