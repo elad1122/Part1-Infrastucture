@@ -103,7 +103,7 @@ What each setting is for:
 | `node-ip` | Kubernetes traffic between nodes uses the private network |
 | `node-external-ip` | The public IP shows up as the node's `EXTERNAL-IP`, which I use for NodePort and ingress |
 | `advertise-address` | Set to the internal IP. I learned this one the hard way: without it, `node-external-ip` also becomes the address the API server advertises. Pods then tried to reach the API through the public IP, the traffic was dropped by the firewall, and Canal never came up |
-| `write-kubeconfig-mode: "0644"` | Lets my SSH user run kubectl on the node without sudo. Fine for a lab; I'd use `0600` in production |
+| `write-kubeconfig-mode: "0644"` | Lets my SSH user run kubectl on the node without sudo. Fine for a lab. I'd use `0600` in production |
 | `tls-san` | Every node's internal and external IP goes into the API server certificate, so I can point kubectl at any node without certificate errors |
 | `etcd-snapshot-schedule-cron` / `etcd-snapshot-retention` | Every 12 hours, keep 5. These are actually RKE2's defaults, but I wrote them out so they're visible and easy to change |
 
@@ -246,11 +246,11 @@ kubectl -n default create secret generic mongodb-auth \
 kubectl apply -f root-app.yaml
 ```
 
-**Why no Secret is needed to reach the Git repos:** Part2-Application is public, so Argo CD reads the sample app's chart without credentials; this repo and Part3-GitOps are public too. MongoDB's chart repo uses the Secret in this repo, `argocd/repositories/bitnami-oci.yaml`. It registers Bitnami's OCI registry with Argo CD, and because that registry is public, the Secret holds no password and is safe in Git.
+**Why no Secret is needed to reach the Git repos:** Part2-Application is public, so Argo CD reads the sample app's chart without credentials. This repo and Part3-GitOps are public too. MongoDB's chart repo uses the Secret in this repo, `argocd/repositories/bitnami-oci.yaml`. It registers Bitnami's OCI registry with Argo CD, and because that registry is public, the Secret holds no password and is safe in Git.
 
 Here's how each requirement is covered:
 
-- **Bitnami MongoDB 8.0.13:** I used chart `16.5.45`, the release that ships MongoDB 8.0.13. Bitnami has moved its older versioned images to the `bitnamilegacy` repository, so I pointed the chart there. The chart also needs `allowInsecureImages: true` before it accepts a different repository; despite the name, that only skips a check on the image name.
+- **Bitnami MongoDB 8.0.13:** I used chart `16.5.45`, the release that ships MongoDB 8.0.13. Bitnami has moved its older versioned images to the `bitnamilegacy` repository, so I pointed the chart there. The chart also needs `allowInsecureImages: true` before it accepts a different repository. despite the name, that only skips a check on the image name.
 - **Architecture:** a replica set with three members. The reasons are below.
 - **Requests and limits:** set explicitly for both MongoDB and the metrics exporter. The numbers are below.
 - **NodePort:** each member gets its own NodePort: **30017**, **30018** and **30019**. More on this below.
@@ -279,14 +279,14 @@ The thinking was:
 
 - **Requests are only a reservation.** They're what the scheduler counts when it decides where a pod can go, and what the pod is guaranteed when the node is busy. For a database that's mostly idle, 100m is still a safe baseline, and it leaves room for all three members.
 - **I only lowered the requests, not the limits.** Limits don't affect scheduling at all. Each member can still burst up to 500m when it needs to, for example during startup, an initial sync from another member, or a heavier query.
-- **The trade-off:** if a node is really busy, a member only gets CPU in proportion to its request. On this cluster that's an acceptable risk; for a real production database I would give it bigger nodes and higher requests.
+- **The trade-off:** if a node is really busy, a member only gets CPU in proportion to its request. On this cluster that's an acceptable risk. for a real production database I would give it bigger nodes and higher requests.
 - **Limits still protect the node.** These nodes also run etcd and the control plane, and I don't want a busy database taking CPU or memory away from them.
 - **Memory stayed the same.** RAM was never the problem (12 GB per node). The **1Gi memory limit** also does more than cap memory: MongoDB looks at its container's memory limit to size its WiredTiger cache, and with 1Gi it picks about 256 MB. So MongoDB stays inside its limit, rather than assuming it has the whole machine and getting OOM-killed.
 - The **exporter** only reads MongoDB's stats and serves them over HTTP, so 20m is plenty.
 
 ### Exposing a replica set with NodePort
 
-This was the trickiest part. With a single instance, one NodePort Service in front of the pod is enough. A replica set doesn't work that way. When a driver connects, it asks the server for the list of members and then talks to each of them directly, by the addresses the members advertise. In replica-set mode, the Bitnami chart actually ignores `service.type: NodePort`.
+With a single instance, one NodePort Service in front of the pod is enough. A replica set doesn't work that way. When a driver connects, it asks the server for the list of members and then talks to each of them directly, by the addresses the members advertise. In replica-set mode, the Bitnami chart actually ignores `service.type: NodePort`.
 
 So I used the chart's `externalAccess` feature:
 
